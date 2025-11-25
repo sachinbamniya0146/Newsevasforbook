@@ -1,0 +1,42 @@
+// Add this in makeWASocket configuration (around line 63)
+
+const sock = makeWASocket({
+  version,
+  auth: {
+    creds: state.creds,
+    keys: makeCacheableSignalKeyStore(state.keys, P({ level: 'silent' }))
+  },
+  logger: P({ level: 'silent' }),
+  browser: selectedBrowser,
+  printQRInTerminal: false,
+  syncFullHistory: false,
+  markOnlineOnConnect: true,
+  defaultQueryTimeoutMs: undefined,
+  keepAliveIntervalMs: 30000,
+  connectTimeoutMs: 60000,
+  // IMPROVED: Better getMessage handler
+  getMessage: async (key) => {
+    // Return empty message to prevent Bad MAC errors
+    return { conversation: '' };
+  },
+  // NEW: Handle message retries
+  retryRequestDelayMs: 250,
+  maxMsgRetryCount: 3,
+  // NEW: Ignore broadcast messages that cause errors
+  shouldIgnoreJid: (jid) => {
+    return jid.endsWith('@broadcast');
+  }
+});
+
+// Add error handler for decryption errors (add after sock creation)
+sock.ev.on('CB:ib,,dirty', (node) => {
+  // Ignore dirty events that cause Bad MAC
+  logger.warn(`[${name}] Ignored dirty event to prevent Bad MAC`);
+});
+
+// Handle connection errors better
+sock.ws?.on?.('error', (error) => {
+  if (error.message.includes('Bad MAC')) {
+    logger.warn(`[${name}] WebSocket Bad MAC error caught and ignored`);
+  }
+});

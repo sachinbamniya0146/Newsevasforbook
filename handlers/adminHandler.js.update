@@ -1,0 +1,22 @@
+// Add this import at top
+import { handleAdminMenu } from './adminMenuHandler.js';
+
+// Update handleAdminMessage function (replace existing)
+export async function handleAdminMessage(sock, message) {
+  try {
+    // Check if it's a menu command
+    const text = message.message?.conversation || 
+                 message.message?.extendedTextMessage?.text || '';
+    
+    // Handle menu commands first
+    if (text.startsWith('/')) {
+      const handled = await handleAdminMenu(sock, message);
+      if (handled) return;
+    }
+
+    // ... rest of your existing admin handler code
+    
+  } catch (error) {
+    logger.error(`[AdminHandler] Error: ${error.message}`);
+  }
+}
