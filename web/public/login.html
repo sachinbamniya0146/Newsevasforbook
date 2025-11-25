@@ -1,0 +1,144 @@
+<!-- ====================================
+🛡️ LOGIN PAGE - MODERN (SAT SAHEB WELCOME)
+======================================== -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login | Gyan Ganga Seva Admin</title>
+    <link rel="stylesheet" href="./css/main.css">
+    <style>
+        body {
+            background: linear-gradient(135deg, #e0e7ff 0%, #f5f3ff 100%);
+            min-height: 100vh;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .login-box {
+            background: #fff;
+            border-radius: 18px;
+            box-shadow: 0 10px 32px 0 rgba(70,30,140,0.1);
+            padding: 38px 36px 32px 36px;
+            max-width: 370px;
+            width: 95%;
+        }
+        .login-logo {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 18px;
+        }
+        .login-logo img {
+            width: 52px;
+            border-radius: 10px;
+        }
+        .login-welcome {
+            text-align: center;
+            margin-bottom: 12px;
+            font-weight: bold;
+            font-size: 1.07em;
+            color: #7c3aed;
+            letter-spacing: 0.03em;
+        }
+        .sat-saheb-welcome {
+            font-size: 19px;
+            color: #22c55e;
+            margin-bottom: 9px;
+            font-weight: 600;
+            text-align: center;
+        }
+        .login-welcome-sm {
+            font-size: 14px;
+            color: #64748b;
+            text-align: center;
+            margin-bottom: 19px;
+        }
+        .login-form label {
+            color: #20204b;
+            font-size: 15px;
+            font-weight: 500;
+        }
+        .login-input {
+            background: #f5f3ff;
+            border-radius: 5px;
+            border: 1px solid #d1d5db;
+            padding: 10px 12px;
+            width: 100%;
+            margin-bottom: 18px;
+            font-size: 15px;
+            font-family: 'Segoe UI', Arial, sans-serif;
+        }
+        .login-btn {
+            width: 100%;
+            padding: 12px 0;
+            background: linear-gradient(90deg,#7c3aed 20%,#6366f1 82%);
+            border: none;
+            color: #fff;
+            font-size: 17px;
+            border-radius: 7px;
+            font-weight: 600;
+            margin-bottom: 7px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .login-btn:hover { opacity: 0.94; }
+        .login-hint {
+            color: #a1a1aa;
+            font-size: 13px;
+            text-align: center;
+            margin-top: 10px;
+        }
+        .login-err {
+            background: #fee2e2;
+            color: #991b1b;
+            border-radius: 6px;
+            text-align: center;
+            font-size: 14px;
+            margin-bottom: 13px;
+            padding: 7px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <div class="login-logo">
+            <img src="https://i.imgur.com/7pBrpbC.png" alt="GGS logo"/>
+            <span style="font-weight:700;color:#5341d7;font-size:1.2em;">Gyan Ganga Seva</span>
+        </div>
+        <div class="sat-saheb-welcome">[translate:सत साहेब भगत जी!]<br>[translate:Welcome, Sant Rampal Ji Maharaj disciple!]</div>
+        <div class="login-welcome">World's Most Advanced Bulk WhatsApp + Order System</div>
+        <div class="login-welcome-sm">Please login to continue as administrator or staff</div>
+        <div id="loginError" class="login-err">Invalid username or password</div>
+        <form class="login-form" onsubmit="return doLogin(event)">
+            <label for="uid">User ID</label><br>
+            <input class="login-input" id="uid" type="text" name="uid" required autofocus autocomplete="username"><br>
+            <label for="pwd">Password</label><br>
+            <input class="login-input" id="pwd" type="password" name="pwd" required autocomplete="current-password">
+            <button class="login-btn" type="submit">Login</button>
+        </form>
+        <div class="login-hint">For assistance, contact: +91 8586003472<br>Powered by Gyan Ganga Seva Team</div>
+    </div>
+    <script>
+        async function doLogin(ev) {
+            ev.preventDefault();
+            const uid = document.getElementById('uid').value.trim();
+            const pwd = document.getElementById('pwd').value.trim();
+            const res = await fetch('/api/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ uid, pwd })
+            });
+            if (res.ok) {
+                window.location.href = '/';
+            } else {
+                document.getElementById('loginError').style.display = 'block';
+            }
+        }
+    </script>
+</body>
+</html>
