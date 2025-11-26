@@ -14,7 +14,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const JWT_SECRET = 'your-secret-key-change-in-production';
+const JWT_SECRET = '9174406375';
 
 // Credentials (hardcoded as per requirement)
 const ADMIN_CREDENTIALS = {
