@@ -1,0 +1,39 @@
+{
+  "name": "wasevasatguru-bot",
+  "version": "3.0.0",
+  "description": "Multi-WhatsApp Business Bot with Bulk Sender - Production Ready",
+  "main": "bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node --watch bot.js",
+    "clean": "rm -rf sessions/* data/* logs/*",
+    "backup": "tar -czf backup_$(date +%Y%m%d_%H%M%S).tar.gz sessions/ data/",
+    "logs": "tail -f logs/bot.log"
+  },
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "bot",
+    "bulk-sender",
+    "multi-session"
+  ],
+  "author": "Waseva Satguru",
+  "license": "MIT",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.8",
+    "chalk": "^5.3.0",
+    "fs-extra": "^11.3.2",
+    "node-cron": "^4.2.1",
+    "node-fetch": "^3.3.2",
+    "pino": "^8.19.0",
+    "qrcode-terminal": "^0.12.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.19"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

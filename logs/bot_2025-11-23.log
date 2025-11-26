@@ -1,0 +1,15 @@
+[2025-11-23 22:04:07] [SUCCESS] [module_job:377] 🚀 Waseva Satguru Bot - Multi WhatsApp
+[2025-11-23 22:04:28] [INFO] [bot.js:233] Starting: 1 (917747920884)
+[2025-11-23 22:04:46] [INFO] [bot.js:233] Starting: 77 (919174406375)
+[2025-11-23 22:07:10] [WARN] [bot.js:124] [1] Disconnected: code=408
+[2025-11-23 22:07:10] [INFO] [bot.js:136] [1] Retry 1/5 in 8s...
+[2025-11-23 22:07:29] [WARN] [bot.js:124] [77] Disconnected: code=408
+[2025-11-23 22:07:29] [INFO] [bot.js:136] [77] Retry 1/5 in 8s...
+[2025-11-23 22:07:45] [ERROR] [bot.js:101] [77] Pairing error: Connection Closed
+[2025-11-23 22:07:45] [ERROR] [bot.js:101] [1] Pairing error: Connection Closed
+[2025-11-23 22:07:51] [WARN] [bot.js:124] [77] Disconnected: code=401
+[2025-11-23 22:07:51] [ERROR] [bot.js:127] [77] 401 - Session invalid
+[2025-11-23 22:07:51] [INFO] [bot.js:128] Delete ./sessions/77 and reconnect
+[2025-11-23 22:07:51] [WARN] [bot.js:124] [1] Disconnected: code=401
+[2025-11-23 22:07:51] [ERROR] [bot.js:127] [1] 401 - Session invalid
+[2025-11-23 22:07:51] [INFO] [bot.js:128] Delete ./sessions/1 and reconnect

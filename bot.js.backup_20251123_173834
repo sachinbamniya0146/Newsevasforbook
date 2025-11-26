@@ -1,0 +1,637 @@
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
+  Browsers,
+  makeCacheableSignalKeyStore,
+  fetchLatestBaileysVersion,
+  delay
+} from '@whiskeysockets/baileys';
+
+import P from 'pino';
+import readline from 'readline';
+import qrcode from 'qrcode-terminal';
+import fs from 'fs';
+import { handleMessage } from './handlers/messageHandler.js';
+import { handleAdminMessage, updateActiveSessions } from './handlers/adminHandler.js';
+import { initScheduler } from './utils/scheduler.js';
+import { logger } from './utils/logger.js';
+import CONFIG from './config.js';
+import { registerSession, unregisterSession, updateSessionState, getAllSessionInfo } from './utils/connectionManager.js';
+import { getBulkSender } from './utils/bulkSender.js';
+import { getSessionAdminManager } from './utils/sessionManager.js';
+import { getPairingManager } from './utils/pairingManager.js';
+import { 
+  registerActiveSession, 
+  unregisterActiveSession, 
+  getFirstActiveSession,
+  getAllActiveSessions,
+  updateSessionActivity
+} from './utils/sessionHelper.js';
+
+// ==================== CONSTANTS & GLOBALS ====================
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const sessions = new Map();
+const retryMap = new Map();
+const adminPairRequests = new Map();
+let bulkSenderInitialized = false;
+let schedulerInitialized = false;
+let healthCheckInterval = null;
+let autoReconnectEnabled = true;
+
+// ==================== UTILITY FUNCTIONS ====================
+function ask(q) {
+  return new Promise(r => rl.question(q, r));
+}
+
+function getTimestamp() {
+  return new Date().toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true
+  });
+}
+
+function saveSessionState() {
+  try {
+    const stateDir = './data';
+    if (!fs.existsSync(stateDir)) {
+      fs.mkdirSync(stateDir, { recursive: true });
+    }
+    const stateFile = `${stateDir}/session_state.json`;
+    const state = {
+      sessions: Array.from(sessions.keys()),
+      timestamp: new Date().toISOString(),
+      totalSessions: sessions.size,
+      bulkSenderActive: bulkSenderInitialized,
+      schedulerActive: schedulerInitialized
+    };
+    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+  } catch (error) {
+    logger.error(`State save error: ${error.message}`);
+  }
+}
+
+// ==================== HEALTH CHECK SYSTEM ====================
+function startHealthCheck() {
+  if (healthCheckInterval) return;
+  
+  healthCheckInterval = setInterval(async () => {
+    try {
+      logger.info('[HealthCheck] Running system check...');
+      
+      // Check sessions
+      const activeSessions = getAllActiveSessions();
+      for (const [name, sock] of sessions.entries()) {
+        if (!sock.user) {
+          logger.warn(`[HealthCheck] Session ${name} has no user info`);
+        } else {
+          updateSessionActivity(name);
+        }
+      }
+      
+      // Check bulk sender
+      if (bulkSenderInitialized) {
+        try {
+          const status = getBulkSender().getStatus();
+          if (!status.isRunning && autoReconnectEnabled) {
+            logger.warn('[HealthCheck] Bulk sender stopped, restarting...');
+            await getBulkSender().start();
+          }
+        } catch (e) {
+          logger.error(`[HealthCheck] Bulk sender check failed: ${e.message}`);
+        }
+      }
+      
+      saveSessionState();
+      logger.info(`[HealthCheck] ✓ ${sessions.size} sessions active`);
+    } catch (error) {
+      logger.error(`[HealthCheck] Error: ${error.message}`);
+    }
+  }, 300000); // Every 5 minutes
+}
+
+// ==================== CONNECTION FUNCTION ====================
+async function connect(name, mode, phone = null, pairAdminJid = null) {
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState('./sessions/' + name);
+    const { version } = await fetchLatestBaileysVersion();
+
+    const browserConfigs = [
+      Browsers.macOS('Safari'),
+      Browsers.ubuntu('Chrome'),
+      ['Chrome (Linux)', '', ''],
+      ['Windows', 'Firefox', '123.0']
+    ];
+
+    const browserIndex = retryMap.get(name) || 0;
+    const selectedBrowser = browserConfigs[browserIndex % browserConfigs.length];
+
+    const sock = makeWASocket({
+      version,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, P({ level: 'silent' }))
+      },
+      logger: P({ level: 'silent' }),
+      browser: selectedBrowser,
+      printQRInTerminal: false,
+      syncFullHistory: false,
+      markOnlineOnConnect: true,
+      defaultQueryTimeoutMs: undefined,
+      keepAliveIntervalMs: 30000,
+      connectTimeoutMs: 60000,
+      getMessage: async (key) => ({ conversation: 'Message not available' })
+    });
+
+    let pairingCodeAttempted = false;
+
+    registerSession(name, sock);
+    registerActiveSession(name, sock);
+    updateSessionState(name, 'connecting', 'Initializing connection...');
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      // QR Code Mode
+      if (mode === 'qr' && qr && !state.creds.registered) {
+        console.log(`\n========= SCAN QR [${name}] =========`);
+        qrcode.generate(qr, { small: true });
+        console.log(`WhatsApp > Linked Devices > Scan QR\n`);
+        updateSessionState(name, 'connecting', 'Waiting for QR scan...');
+      }
+
+      // Pairing Code Mode
+      if ((mode === 'pair') && !pairingCodeAttempted && !state.creds.registered && phone) {
+        if (connection === 'open' || connection === 'connecting') {
+          pairingCodeAttempted = true;
+          await delay(2200);
+
+          try {
+            const code = await sock.requestPairingCode(phone);
+            console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+            console.log(`📱 SESSION: ${name}`);
+            console.log(`🔑 PAIRING CODE: ${code}`);
+            console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+            console.log(`Steps:`);
+            console.log(`1. Open WhatsApp (${phone})`);
+            console.log(`2. Settings > Linked Devices`);
+            console.log(`3. Link with phone number`);
+            console.log(`4. Enter: ${code}`);
+            console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+            updateSessionState(name, 'connecting', `Pairing code: ${code}`);
+
+            // Forward pairing code to admin WhatsApp
+            const toAdmin = pairAdminJid || adminPairRequests.get(name) || CONFIG.ADMIN.JID;
+            try {
+              const pairMessage = `🔐 *Pairing Code*\n\n` +
+                `Session: *${name}*\n` +
+                `Phone: ${phone}\n` +
+                `Code: \`${code}\`\n\n` +
+                `Enter this code in WhatsApp:\n` +
+                `Settings > Linked Devices > Link with Phone Number`;
+              
+              await sock.sendMessage(toAdmin, { text: pairMessage });
+              getPairingManager().forwardPairingCode(name, code, phone);
+            } catch (e) {
+              logger.warn(`[${name}] Could not forward pairing code to admin: ${e.message}`);
+            }
+          } catch (e) {
+            logger.error(`[${name}] Pairing error: ${e.message}`);
+            updateSessionState(name, 'error', `Pairing failed: ${e.message}`);
+          }
+        }
+      }
+
+      // Connected Successfully
+      if (connection === 'open') {
+        logger.success(`✅ CONNECTED: ${name} at ${getTimestamp()}`);
+        sessions.set(name, sock);
+        retryMap.delete(name);
+        updateActiveSessions(sessions);
+        updateSessionState(name, 'connected', 'Active');
+        saveSessionState();
+
+        try { 
+          getPairingManager().markPairingSuccess(name); 
+        } catch {}
+        
+        // Initialize Bulk Sender (only once for first session)
+        if (!bulkSenderInitialized && sessions.size >= 1) {
+          bulkSenderInitialized = true;
+          logger.info('🚀 Initializing Bulk Sender...');
+          try {
+            await getBulkSender().initialize();
+            logger.success('✅ Bulk Sender initialized');
+          } catch (e) { 
+            logger.error(`❌ Bulk Sender init error: ${e.message}`); 
+            bulkSenderInitialized = false;
+          }
+        }
+        
+        // Initialize Scheduler (only for first session)
+        if (!schedulerInitialized && sessions.size === 1) {
+          schedulerInitialized = true;
+          try {
+            initScheduler(sock);
+            logger.success('✅ Scheduler initialized');
+          } catch (e) { 
+            logger.error(`❌ Scheduler init error: ${e.message}`);
+            schedulerInitialized = false;
+          }
+        }
+
+        // Start health check system
+        startHealthCheck();
+      }
+
+      // Disconnected
+      if (connection === 'close') {
+        const code = lastDisconnect?.error?.output?.statusCode;
+        const shouldRetry = code !== DisconnectReason.loggedOut;
+
+        logger.warn(`[${name}] Disconnected: code=${code} at ${getTimestamp()}`);
+        updateSessionState(name, 'disconnected', `Code: ${code}`);
+
+        if (code === 401) {
+          logger.error(`[${name}] 401 - Session invalid/expired`);
+          logger.info(`❌ Delete ./sessions/${name} folder and reconnect`);
+          sessions.delete(name);
+          retryMap.delete(name);
+          unregisterSession(name);
+          unregisterActiveSession(name);
+          saveSessionState();
+          try { 
+            getPairingManager().markPairingFailed(name, 'Session invalid (401)'); 
+          } catch {}
+        }
+        else if (shouldRetry && autoReconnectEnabled) {
+          const retries = retryMap.get(name) || 0;
+          if (retries < 5) {
+            retryMap.set(name, retries + 1);
+            const delayTime = 1200 * (retries + 1);
+            logger.info(`[${name}] Retry ${retries + 1}/5 in ${delayTime/1000}s...`);
+            updateSessionState(name, 'reconnecting', `Retry ${retries + 1}/5`);
+            await delay(delayTime);
+            connect(name, mode, phone, pairAdminJid || adminPairRequests.get(name) || CONFIG.ADMIN.JID);
+          } else {
+            logger.error(`[${name}] Max retries reached (5)`);
+            sessions.delete(name);
+            retryMap.delete(name);
+            unregisterSession(name);
+            unregisterActiveSession(name);
+            saveSessionState();
+            try { 
+              getPairingManager().markPairingFailed(name, 'Max retries exceeded'); 
+            } catch {}
+          }
+        }
+        else {
+          logger.error(`[${name}] Logged out from WhatsApp`);
+          sessions.delete(name);
+          retryMap.delete(name);
+          unregisterSession(name);
+          unregisterActiveSession(name);
+          saveSessionState();
+          try { 
+            getPairingManager().markPairingFailed(name, 'Logged out'); 
+          } catch {}
+        }
+      }
+    });
+
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+      for (const m of messages) {
+        if (!m.message || m.key.fromMe) continue;
+        const from = m.key.remoteJid;
+        
+        try {
+          const sessionAdminManager = getSessionAdminManager();
+          const msgText = m.message?.conversation || m.message?.extendedTextMessage?.text || '';
+          
+          // Remote pairing command: /pair wa1 919876543210
+          if (msgText.startsWith('/pair ') && sessionAdminManager.isAdmin(from)) {
+            const parts = msgText.trim().split(/\s+/);
+            if (parts.length >= 3) {
+              const sessionName = parts[1];
+              const phoneNumber = parts[2].replace(/[^0-9]/g, '');
+              if (phoneNumber.length >= 10) {
+                adminPairRequests.set(sessionName, from);
+                logger.info(`[Admin] Remote pairing: ${sessionName} (${phoneNumber})`);
+                connect(sessionName, 'pair', phoneNumber, from);
+                const initMsg = `🚦 *Pairing Initiated*\n\n` +
+                  `Session: ${sessionName}\n` +
+                  `Phone: ${phoneNumber}\n\n` +
+                  `Wait for pairing code in this chat...`;
+                await sock.sendMessage(from, { text: initMsg });
+                continue;
+              }
+            }
+            const errorMsg = `❌ *Invalid Format*\n\n` +
+              `Usage: /pair <session_name> <phone>\n` +
+              `Example: /pair wa1 919876543210`;
+            await sock.sendMessage(from, { text: errorMsg });
+            continue;
+          }
+
+          // Handle admin or user messages
+          if (sessionAdminManager.isAdmin(from)) {
+            await handleAdminMessage(sock, m);
+          } else {
+            await handleMessage(sock, m, name);
+          }
+        } catch (e) {
+          logger.error(`[${name}] Message error: ${e.message}`);
+        }
+      }
+    });
+
+  } catch (e) {
+    logger.error(`[${name}] Connection error: ${e.message}`);
+    updateSessionState(name, 'error', e.message);
+  }
+}
+
+// ==================== AUTO-START SESSIONS ====================
+async function autoStartAll() {
+  try {
+    if (!fs.existsSync('./sessions')) {
+      fs.mkdirSync('./sessions', { recursive: true });
+      return 0;
+    }
+    const dirs = fs.readdirSync('./sessions');
+    let restored = 0;
+    for (const dir of dirs) {
+      const credsPath = `./sessions/${dir}/creds.json`;
+      if (fs.existsSync(credsPath)) {
+        logger.info(`🔄 Restoring: ${dir}`);
+        connect(dir, 'qr');
+        restored++;
+        await delay(1200);
+      }
+    }
+    return restored;
+  } catch (e) {
+    logger.error('Auto-start error: ' + e.message);
+    return 0;
+  }
+}
+
+// ==================== INTERACTIVE MENU ====================
+async function menu() {
+  console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`🌟 Waseva Satguru Bot 🌟`);
+  console.log(`Multiple WhatsApp Manager`);
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`1 - Link WhatsApp (Pairing Code)`);
+  console.log(`2 - Link WhatsApp (QR Code)`);
+  console.log(`3 - Show Active Sessions`);
+  console.log(`4 - Session Details`);
+  console.log(`5 - Remove Session`);
+  console.log(`6 - Bulk Sender Status`);
+  console.log(`7 - Pairing Stats`);
+  console.log(`8 - System Health`);
+  console.log(`9 - Toggle Auto-Reconnect`);
+  console.log(`0 - Exit Bot`);
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+  
+  const choice = await ask('Enter choice: ');
+  
+  if (choice === '1') {
+    const name = await ask('Session name (wa1, wa2...): ');
+    if (!name || name.trim() === '') { 
+      console.log('❌ Invalid session name'); 
+      return menu(); 
+    }
+    const phoneRaw = await ask('Phone (919876543210): ');
+    const phone = phoneRaw.replace(/[^0-9]/g, '');
+    if (phone.length < 10) { 
+      console.log('❌ Invalid phone number (min 10 digits)'); 
+      return menu(); 
+    }
+    logger.info(`Starting: ${name} (${phone})`);
+    adminPairRequests.set(name, CONFIG.ADMIN.JID);
+    connect(name, 'pair', phone, CONFIG.ADMIN.JID);
+    console.log(`\n✅ Pairing code will appear in 3-5 seconds`);
+    console.log(`💡 You can link more WhatsApp accounts!\n`);
+    setTimeout(menu, 5000);
+  }
+  else if (choice === '2') {
+    const name = await ask('Session name (wa1, wa2...): ');
+    if (!name || name.trim() === '') { 
+      console.log('❌ Invalid session name'); 
+      return menu(); 
+    }
+    logger.info(`Starting QR: ${name}`);
+    connect(name, 'qr');
+    console.log(`\n✅ QR code will appear in 3-5 seconds\n`);
+    setTimeout(menu, 5000);
+  }
+  else if (choice === '3') {
+    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`📊 ACTIVE SESSIONS: ${sessions.size}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    if (sessions.size === 0) { 
+      console.log('❌ No active sessions'); 
+    } else {
+      let i = 1;
+      for (const [name, sock] of sessions) {
+        const jid = sock.user?.id || 'Unknown';
+        const phone = jid.split(':')[0];
+        console.log(`${i}. ${name} - ${phone}`); 
+        i++;
+      }
+    }
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    setTimeout(menu, 1000);
+  }
+  else if (choice === '4') {
+    const sessionInfo = getAllSessionInfo();
+    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`📊 SESSION DETAILS\n`);
+    if (Object.keys(sessionInfo).length === 0) { 
+      console.log('❌ No sessions found'); 
+    } else {
+      for (const [name, info] of Object.entries(sessionInfo)) {
+        console.log(`📱 ${name}:`);
+        console.log(`   State: ${info.state}`);
+        console.log(`   Status: ${info.lastStatus}`);
+        console.log(`   Retries: ${info.retry}`);
+        console.log(`   Errors: ${info.errors}\n`);
+      }
+    }
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    setTimeout(menu, 1000);
+  }
+  else if (choice === '5') {
+    const name = await ask('Session to remove: ');
+    if (sessions.has(name)) {
+      sessions.delete(name);
+      unregisterSession(name);
+      unregisterActiveSession(name);
+      saveSessionState();
+      console.log(`✅ Removed session: ${name}`);
+      console.log(`💡 Delete ./sessions/${name} folder to remove completely`);
+    } else {
+      console.log(`❌ Session not found: ${name}`);
+    }
+    setTimeout(menu, 1000);
+  }
+  else if (choice === '6') {
+    try {
+      const status = getBulkSender().getStatus();
+      console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      console.log(`📤 BULK SENDER STATUS\n`);
+      console.log(`Running: ${status.isRunning ? '✅ Yes' : '❌ No'}`);
+      console.log(`Paused: ${status.isPaused ? 'Yes' : 'No'}`);
+      console.log(`Current File: ${status.currentFile}`);
+      console.log(`Progress: ${status.fileProgress}`);
+      console.log(`Remaining: ${status.contactsRemaining} contacts`);
+      console.log(`Active Campaigns: ${status.activeCampaigns}`);
+      console.log(`Queued Campaigns: ${status.queuedCampaigns}`);
+      console.log(`Total Sent: ${status.globalStats.totalSent}`);
+      console.log(`Total Failed: ${status.globalStats.totalFailed}`);
+      console.log(`Success Rate: ${status.successRate}`);
+      console.log(`Uptime: ${status.uptime}`);
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    } catch (e) {
+      console.log(`❌ Bulk sender not initialized yet`);
+      console.log(`💡 Connect at least one WhatsApp session first\n`);
+    }
+    setTimeout(menu, 1000);
+  }
+  else if (choice === '7') {
+    try {
+      const stats = getPairingManager().getStats();
+      console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      console.log(`🔑 PAIRING STATISTICS\n`);
+      console.log(`Total Attempts: ${stats.total}`);
+      console.log(`Successful: ${stats.successful}`);
+      console.log(`Failed: ${stats.failed}`);
+      console.log(`Pending: ${stats.pending}`);
+      console.log(`Success Rate: ${stats.successRate}`);
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    } catch (e) {
+      console.log(`❌ Pairing manager not ready\n`);
+    }
+    setTimeout(menu, 1000);
+  }
+  else if (choice === '8') {
+    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`🏥 SYSTEM HEALTH\n`);
+    console.log(`Active Sessions: ${sessions.size}`);
+    console.log(`Bulk Sender: ${bulkSenderInitialized ? '✅ Running' : '❌ Not initialized'}`);
+    console.log(`Scheduler: ${schedulerInitialized ? '✅ Running' : '❌ Not initialized'}`);
+    console.log(`Auto-Reconnect: ${autoReconnectEnabled ? '✅ Enabled' : '❌ Disabled'}`);
+    console.log(`Health Check: ${healthCheckInterval ? '✅ Active' : '❌ Inactive'}`);
+    console.log(`Timestamp: ${getTimestamp()}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    setTimeout(menu, 1000);
+  }
+  else if (choice === '9') {
+    autoReconnectEnabled = !autoReconnectEnabled;
+    console.log(`\n${autoReconnectEnabled ? '✅ Auto-Reconnect ENABLED' : '❌ Auto-Reconnect DISABLED'}\n`);
+    setTimeout(menu, 1000);
+  }
+  else if (choice === '0') {
+    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`👋 Exiting Waseva Satguru Bot...`);
+    console.log(`💾 ${sessions.size} session(s) saved`);
+    console.log(`🔄 Auto-restore on next run`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    if (healthCheckInterval) {
+      clearInterval(healthCheckInterval);
+    }
+    saveSessionState();
+    process.exit(0);
+  }
+  else {
+    console.log('❌ Invalid choice, please try again');
+    setTimeout(menu, 500);
+  }
+}
+
+// ==================== MAIN EXECUTION ====================
+(async () => {
+  console.log('\n');
+  logger.success('🚀 Waseva Satguru Bot - Multi WhatsApp (Production)');
+  logger.info('📦 Version: 2.2.0 - 24/7 Ready');
+  logger.info('🔧 All Features + Health Check Integrated');
+  logger.info(`⏰ Started at: ${getTimestamp()}`);
+  
+  try { 
+    getSessionAdminManager(); 
+    getPairingManager(); 
+    logger.success('✅ Core Managers initialized'); 
+  } catch (e) { 
+    logger.error(`❌ Manager init error: ${e.message}`); 
+  }
+  
+  const restored = await autoStartAll();
+  
+  if (restored > 0) {
+    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`✅ Restored ${restored} session(s)`);
+    console.log(`💡 All WhatsApp accounts active`);
+    console.log(`💡 Bot running 24/7 with auto-recovery`);
+    console.log(`🏥 Health check active (every 5 minutes)`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+  } else {
+    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`📱 No saved sessions found`);
+    console.log(`💡 Link your first WhatsApp account`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+  }
+  
+  menu();
+})();
+
+// ==================== ERROR HANDLERS ====================
+process.on('SIGINT', () => {
+  console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`👋 Bot stopped gracefully`);
+  console.log(`💾 ${sessions.size} session(s) saved`);
+  console.log(`🔄 Run again to auto-restore`);
+  console.log(`⏰ Stopped at: ${getTimestamp()}`);
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+  if (healthCheckInterval) {
+    clearInterval(healthCheckInterval);
+  }
+  saveSessionState();
+  process.exit(0);
+});
+
+process.on('uncaughtException', (e) => { 
+  logger.error(`Uncaught Exception: ${e.message}`); 
+  logger.error(e.stack);
+  saveSessionState();
+});
+
+process.on('unhandledRejection', (e) => { 
+  logger.error(`Unhandled Promise Rejection: ${e.message}`); 
+  logger.error(e.stack);
+});
+
+process.on('SIGTERM', () => {
+  logger.warn('SIGTERM received, shutting down gracefully...');
+  if (healthCheckInterval) {
+    clearInterval(healthCheckInterval);
+  }
+  saveSessionState();
+  process.exit(0);
+});
+
+// ==================== KEEP-ALIVE FOR 24/7 ====================
+setInterval(() => {
+  const memUsage = process.memoryUsage();
+  const memMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+  if (memMB > 500) {
+    logger.warn(`High memory usage: ${memMB}MB`);
+  }
+}, 600000); // Check every 10 minutes
