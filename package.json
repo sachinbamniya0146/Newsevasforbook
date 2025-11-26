@@ -9,14 +9,21 @@
     "dev": "node --watch bot.js",
     "clean": "rm -rf sessions/* data/* logs/*",
     "backup": "tar -czf backup_$(date +%Y%m%d_%H%M%S).tar.gz sessions/ data/",
-    "logs": "tail -f logs/bot.log"
+    "logs": "tail -f logs/bot.log",
+
+    // ✅ Added - Web Dashboard scripts
+    "server": "node server.js",
+    "full": "node server.js & node bot.js"
   },
   "keywords": [
     "whatsapp",
     "baileys",
     "bot",
     "bulk-sender",
-    "multi-session"
+    "multi-session",
+    "dashboard",
+    "admin-panel",
+    "order-system"
   ],
   "author": "Waseva Satguru",
   "license": "MIT",
@@ -28,7 +35,13 @@
     "node-fetch": "^3.3.2",
     "pino": "^8.19.0",
     "qrcode-terminal": "^0.12.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+
+    // ✅ Added for Web Dashboard + API + Login + QR
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "jsonwebtoken": "^9.0.2",
+    "qrcode": "^1.5.3"
   },
   "devDependencies": {
     "@types/node": "^20.11.19"
